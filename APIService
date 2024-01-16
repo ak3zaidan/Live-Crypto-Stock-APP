@@ -1,0 +1,257 @@
+import Foundation
+import CoreData
+
+final class APICaller {
+    
+    private init() {}
+    
+    public func search(query: String, completion: @escaping (Result<SearchResponse, Error>) -> ()) {
+        guard let safeQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)
+        else { return }
+        makeAPIRequest(
+            url: url(for: .search, queryParams: ["q": safeQuery]),
+            expecting: SearchResponse.self,
+            completion: completion
+        )
+    }
+    public func marketData(for symbol: String, numberOfDays: Int, enough: Bool, completion: @escaping (Result<MarketDataResponse, Error>) -> ()) {
+        let bothDates = getDatesForWeekdayOrWeekend(numDays: numberOfDays, enoughPreMarketData: enough)
+        var res = "1"
+        if numberOfDays == 7 {
+            res = "30"
+        } else if numberOfDays == 30 {
+            res = "60"
+        } else if numberOfDays == 365 {
+            res = "D"
+        }
+        makeAPIRequest(
+            url: url(
+                for: .marketData,
+                queryParams: [
+                    "symbol": symbol,
+                    "resolution": res,
+                    "from": "\(Int(bothDates.0.timeIntervalSince1970))",
+                    "to": "\(Int(bothDates.1.timeIntervalSince1970))",
+                ]
+            ), expecting: MarketDataResponse.self, completion: completion)
+    }
+    public func holidayMarketData(for symbol: String, enoughPre: Bool, completion: @escaping (Result<MarketDataResponse, Error>) -> ()) {
+        if let bothDates = getDatesForHoliday(enough: enoughPre) {
+            makeAPIRequest(
+                url: url(
+                    for: .marketData,
+                    queryParams: [
+                        "symbol": symbol,
+                        "resolution": "1",
+                        "from": "\(Int(bothDates.0.timeIntervalSince1970))",
+                        "to": "\(Int(bothDates.1.timeIntervalSince1970))",
+                    ]
+                ), expecting: MarketDataResponse.self, completion: completion)
+        }
+    }
+    public func exceptionMarketData(for symbol: String, enoughPre: Bool, completion: @escaping (Result<MarketDataResponse, Error>) -> ()) {
+        if let bothDates = getDatesForHoliday(enough: enoughPre) {
+            makeAPIRequest(
+                url: url(
+                    for: .marketData,
+                    queryParams: [
+                        "symbol": symbol,
+                        "resolution": "1",
+                        "from": "\(Int(bothDates.0.timeIntervalSince1970))",
+                        "to": "\(Int(bothDates.1.timeIntervalSince1970))",
+                    ]
+                ), expecting: MarketDataResponse.self, completion: completion)
+        }
+    }
+    func getDatesForException(enough: Bool) -> (Date, Date)? {
+        let wrongDate = getDatesForWeekdayOrWeekend(numDays: 1, enoughPreMarketData: enough).0
+            
+        var calendar = Calendar.current
+        if let marketTimeZone = TimeZone(identifier: "America/New_York") {
+            calendar.timeZone = marketTimeZone
+            let dayOfWeek = calendar.component(.weekday, from: wrongDate)
+            
+            let farBack = calendar.date(byAdding: .day, value: dayOfWeek == 2 ? -4 : dayOfWeek == 3 ? -4 : -2, to: wrongDate)!
+            let currentDayStart = calendar.date(bySettingHour: 0, minute: 0, second: 0, of: farBack)!
+            return(currentDayStart, Date())
+        }
+        return nil
+    }
+    func getDatesForHoliday(enough: Bool) -> (Date, Date)? {
+        let wrongDate = getDatesForWeekdayOrWeekend(numDays: 1, enoughPreMarketData: enough).0
+            
+        var calendar = Calendar.current
+        if let marketTimeZone = TimeZone(identifier: "America/New_York") {
+            calendar.timeZone = marketTimeZone
+            let dayOfWeek = calendar.component(.weekday, from: wrongDate)
+            
+            let farBack = calendar.date(byAdding: .day, value: dayOfWeek == 2 ? -3 : -1, to: wrongDate)!
+            let currentDayStart = calendar.date(bySettingHour: 0, minute: 0, second: 0, of: farBack)!
+            return(currentDayStart, Date())
+        }
+        return nil
+    }
+    public func cryptoMarketData(for symbol: String, numberOfDays: Int, completion: @escaping (Result<MarketDataResponse, Error>) -> ()) {
+        let today = Date()
+        let currentDayStart = Calendar.current.date(bySettingHour: 0, minute: 0, second: 0, of: today)!
+        
+        var bothDates = (currentDayStart, Date())
+        var res = "1"
+        if numberOfDays == 7 {
+            bothDates.0 = Calendar.current.date(byAdding: .day, value: -7, to: today)!
+            res = "30"
+        } else if numberOfDays == 30 {
+            bothDates.0 = Calendar.current.date(byAdding: .day, value: -30, to: today)!
+            res = "60"
+        } else if numberOfDays == 365 {
+            bothDates.0 = Calendar.current.date(byAdding: .day, value: -365, to: today)!
+            res = "D"
+        }
+        if let url = URL(string: "\(Constants.baseUrl)crypto/candle?symbol=BINANCE:\(symbol)USDT&resolution=\(res)&from=\(Int(bothDates.0.timeIntervalSince1970))&to=\(Int(bothDates.1.timeIntervalSince1970))&token=\(Constants.apiKey)") {
+            makeAPIRequest(url: url, expecting: MarketDataResponse.self, completion: completion)
+        }
+    }
+    func checkHoliday(completion: @escaping(Bool) -> Void){
+        if let url = URL(string: "\(Constants.baseUrl)stock/market-status?exchange=US&token=\(Constants.apiKey)") {
+            makeAPIRequest(url: url, expecting: MarketStatus.self) { result in
+                switch result {
+                    case .success(let marketStatus):
+                        if marketStatus.holiday == nil {
+                            completion(false)
+                        } else {
+                            completion(true)
+                        }
+                    case .failure:
+                        completion(false)
+                }
+            }
+        }
+    }
+    func getDatesForWeekdayOrWeekend(numDays: Int, enoughPreMarketData: Bool) -> (Date, Date) {
+        let today = Date()
+        if numDays == 1 {  
+            var calendar = Calendar.current
+            let now = Date()
+            
+            if let marketTimeZone = TimeZone(identifier: "America/New_York") {
+                calendar.timeZone = marketTimeZone
+                let dayOfWeek = calendar.component(.weekday, from: today)
+                
+                if calendar.isDateInWeekend(today) {
+                    let previousFriday = calendar.date(byAdding: .day, value: dayOfWeek == 1 ? -2 : -1, to: today)!
+                    
+                    let startOfDay = calendar.date(bySettingHour: 0, minute: 1, second: 0, of: previousFriday)!
+                    
+                    let endOfDay = calendar.date(bySettingHour: 23, minute: 59, second: 59, of: previousFriday)!
+                    
+                    return (startOfDay, endOfDay)
+                }
+
+                let currentHour = calendar.component(.hour, from: now)
+                let currentMinute = calendar.component(.minute, from: now)
+                let totalMinutes = currentHour * 60 + currentMinute
+                let preMarketStartTime = 9 * 60  // 9:00 AM
+                
+                if totalMinutes < preMarketStartTime && !enoughPreMarketData {
+                    let farBack = calendar.date(byAdding: .day, value: dayOfWeek == 2 ? -3 : -1, to: today)!
+                    let currentDayStart = calendar.date(bySettingHour: 0, minute: 0, second: 0, of: farBack)!
+                    return (currentDayStart, today)
+                } else {
+                    let currentDayStart = calendar.date(bySettingHour: 0, minute: 0, second: 0, of: today)!
+                    return (currentDayStart, today)
+                }
+            } else {
+                let currentDayStart = calendar.date(bySettingHour: 0, minute: 0, second: 0, of: today)!
+                return (currentDayStart, today)
+            }
+        } else {
+            let farBack = Calendar.current.date(byAdding: .day, value: -numDays, to: today)!
+            return (farBack, today)
+        }
+    }
+
+    public func financialMetrics(for symbol: String,completion: @escaping (Result<FinancialMetricsResponse, Error>) -> ()) {
+        let url = url(for: .financials, queryParams: ["symbol": symbol, "metric": "all"])
+        makeAPIRequest(url: url, expecting: FinancialMetricsResponse.self, completion: completion)
+    }
+    
+    public func financialIndicator(for symbol: String,completion: @escaping (Result<AnalysisResponse, Error>) -> ()) {
+        let url = URL(string: "https://finnhub.io/api/v1/scan/technical-indicator?symbol=\(symbol)&resolution=M&token=\(Constants.apiKey)")
+        makeAPIRequest(url: url, expecting: AnalysisResponse.self, completion: completion)
+    }
+    
+    public func marketNews(completion: @escaping (Result<[FinancialNewsResponse], Error>) -> ()) {
+        let url = URL(string: "https://finnhub.io/api/v1/news?category=general&token=\(Constants.apiKey)")
+        makeAPIRequest(url: url, expecting: [FinancialNewsResponse].self, completion: completion)
+    }
+    
+    static func shared() -> APICaller {
+        return sharedInstance
+    }
+
+    private enum Constants {
+        static let apiKey = "<Paste API KEY HERE>"
+        static let baseUrl = "https://finnhub.io/api/v1/"
+        static let day: TimeInterval = 3600 * 24
+    }
+
+    private enum Endpoint: String {
+        case search
+        case topStories = "news"
+        case companyNews = "company-news"
+        case marketData = "stock/candle"
+        case financials = "stock/metric"
+    }
+
+    private enum APIError: Error {
+        case invalidUrl
+        case noDataReturned
+    }
+
+    private static let sharedInstance = APICaller()
+
+    private func queryString(fromParameters parameters: [String: String]) -> String {
+        var queryItems = [URLQueryItem]()
+        
+        for (name, value) in parameters {
+            queryItems.append(URLQueryItem(name: name, value: value))
+        }
+        
+        queryItems.append(URLQueryItem(name: "token", value: Constants.apiKey))
+        
+        return queryItems.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&")
+    }
+
+    private func url(for endpoint: Endpoint, queryParams: [String: String] = [:]) -> URL? {
+        guard let url = URL(string: Constants.baseUrl + endpoint.rawValue + "?" + queryString(fromParameters: queryParams)) else { return nil }
+        return url
+    }
+    
+    private func makeAPIRequest<T: Codable>(url: URL?, expecting: T.Type, completion: @escaping (Result<T, Error>) -> ()) {
+        guard let url = url else {
+            completion(.failure(APIError.invalidUrl))
+            return
+        }
+        let task = URLSession.shared.dataTask(with: url) { data, _, error in
+            guard let data = data, error == nil else {
+                if let error = error {
+                    completion(.failure(error))
+                } else {
+                    completion(.failure(APIError.noDataReturned))
+                }
+                return
+            }
+            completion(self.decodeResponse(from: data, expecting: expecting))
+        }
+        task.resume()
+    }
+    
+    private func decodeResponse<T: Codable>(from data: Data, expecting: T.Type) -> Result<T, Error> {
+        do {
+            let result = try JSONDecoder().decode(expecting, from: data)
+            return .success(result)
+        } catch {
+            return .failure(error)
+        }
+    }
+}
